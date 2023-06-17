@@ -36,19 +36,33 @@ main :: proc() {
 
     rl.InitWindow(800, 600, "Prospector")
 
+    y_offset := i32(0)
+
+    // NOTE: this reduces CPU usage by a LOT
+    // But I don't know if it's the best long term
+    rl.EnableEventWaiting()
+
     for !rl.WindowShouldClose() {
         if state.new_dir != "" {
             fmt.println("before:", state.current_dir)
             switch_dir(&state, state.new_dir)
             state.new_dir = ""
+            y_offset = 0
             fmt.println("after:", state.current_dir)
         }
         if rl.IsKeyPressed(.BACKSPACE) {
             fmt.println("before:", state.current_dir)
             new_path := path.dir(state.current_dir)
             switch_dir(&state, new_path)
+            y_offset = 0
             fmt.println("after:", state.current_dir)
         }
+
+        scroll := rl.GetMouseWheelMove()
+        y_offset += i32(30 * scroll)
+
+        max_offset := cast(i32) (len(state.files)) * 70
+        y_offset = clamp(y_offset, -max_offset, 0)
 
         ctx: UIContext
         ctx.mouse_pos[0] = rl.GetMouseX()
@@ -60,13 +74,21 @@ main :: proc() {
         rl.BeginDrawing()
             rl.ClearBackground(BKGRND_C)
 
-            y := i32(100)
+            parent := os.File_Info{
+                is_dir = true,
+                name = "..",
+            }
+            if make_button(ctx, parent, 100+y_offset) {
+                new_path := path.dir(state.current_dir)
+                state.new_dir = new_path
+            }
+            y := i32(170)
             for file in state.files {
-                clicked := make_button(ctx, file, y)
+                clicked := make_button(ctx, file, y+y_offset)
                 if clicked  && file.is_dir {
                     state.new_dir = strings.clone(file.fullpath)
                 }
-                y += 120
+                y += 70
             }
 
             if state.files == nil {
@@ -75,6 +97,7 @@ main :: proc() {
                 rl.DrawText(text, 70, 140, 20, TEXTF_C)
             }
 
+            rl.DrawRectangle(0, 0, 800, 80, BKGRND_C)
             rl.DrawText("Prospector", 20, 20, 40, TEXT_C)
         rl.EndDrawing()
 
@@ -86,7 +109,7 @@ main :: proc() {
 
 make_button :: proc(ctx: UIContext, file: os.File_Info, y: i32) -> bool {
     mouse := rl.Vector2{ cast(f32) ctx.mouse_pos[0], cast(f32) ctx.mouse_pos[1] }
-    rect := rl.Rectangle{ 50, f32(y), 700, 100 }
+    rect := rl.Rectangle{ 50, f32(y), 700, 50 }
     collide := rl.CheckCollisionPointRec(mouse, rect)
 
     color := DIR_FRGRND_C if file.is_dir else FRGRND_C
@@ -100,9 +123,9 @@ make_button :: proc(ctx: UIContext, file: os.File_Info, y: i32) -> bool {
         color.b += 15
     }
 
-    rl.DrawRectangle(50, y, 700, 100, color)
+    rl.DrawRectangleRec(rect, color)
     file_name := strings.clone_to_cstring(file.name, context.temp_allocator)
-    rl.DrawText(file_name, 70, y + 40, 20, TEXTF_C)
+    rl.DrawText(file_name, 70, y + 15, 20, TEXTF_C)
 
     if ctx.mouse_state[0] == .Released && collide {
         return true
