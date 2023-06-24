@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:mem"
 import path "core:path/filepath"
 import rl "vendor:raylib"
 
@@ -25,12 +26,35 @@ UIContext :: struct {
 }
 
 DirState :: struct {
-    current_dir: string
-    new_dir: string
-    files: []os.File_Info
+    current_dir: string,
+    new_dir: string,
+    files: []FileInfo,
+}
+
+FileInfo :: struct {
+    name: string,
+    fullpath: string,
+    is_dir: bool,
+    size: i64,
 }
 
 main :: proc() {
+    track: mem.Tracking_Allocator
+    mem.tracking_allocator_init(&track, context.allocator)
+    defer mem.tracking_allocator_destroy(&track)
+    context.allocator = mem.tracking_allocator(&track)
+    
+    _main()
+    
+    for _, leak in track.allocation_map {
+    	fmt.printf("%v leaked %v bytes\n", leak.location, leak.size)
+    }
+    for bad_free in track.bad_free_array {
+    	fmt.printf("%v allocation %p was freed badly\n", bad_free.location, bad_free.memory)
+    }
+}
+
+_main :: proc() {
     state := DirState{}
     switch_dir(&state, os.get_current_directory())
 
@@ -70,11 +94,10 @@ main :: proc() {
         ctx.mouse_state[0] = .Released if rl.IsMouseButtonReleased(.LEFT) else .Up
         ctx.mouse_state[0] = .Down if rl.IsMouseButtonDown(.LEFT) else ctx.mouse_state[0]
 
-        // TODO: use camera to scroll
         rl.BeginDrawing()
             rl.ClearBackground(BKGRND_C)
 
-            parent := os.File_Info{
+            parent := FileInfo{
                 is_dir = true,
                 name = "..",
             }
@@ -105,11 +128,21 @@ main :: proc() {
     }
 
     rl.CloseWindow()
+
+    // Cleanup
+    delete(state.current_dir)
+    free_files(state.files)
 }
 
-make_button :: proc(ctx: UIContext, file: os.File_Info, y: i32) -> bool {
+make_button :: proc(ctx: UIContext, file: FileInfo, y: i32) -> bool {
     mouse := rl.Vector2{ cast(f32) ctx.mouse_pos[0], cast(f32) ctx.mouse_pos[1] }
     rect := rl.Rectangle{ 50, f32(y), 700, 50 }
+    window_rect := rl.Rectangle{ 0, 0, 800, 600 }
+
+    if !rl.CheckCollisionRecs(rect, window_rect) {
+        return false
+    }
+
     collide := rl.CheckCollisionPointRec(mouse, rect)
 
     color := DIR_FRGRND_C if file.is_dir else FRGRND_C
@@ -117,15 +150,14 @@ make_button :: proc(ctx: UIContext, file: os.File_Info, y: i32) -> bool {
         color.r -= 30
         color.g -= 30
         color.b -= 30
-    } else if collide {
-        color.r += 15
-        color.g += 15
-        color.b += 15
     }
 
     rl.DrawRectangleRec(rect, color)
     file_name := strings.clone_to_cstring(file.name, context.temp_allocator)
     rl.DrawText(file_name, 70, y + 15, 20, TEXTF_C)
+    if collide {
+        rl.DrawRectangleLinesEx(rect, 5, rl.DARKGRAY)
+    }
 
     if ctx.mouse_state[0] == .Released && collide {
         return true
@@ -133,7 +165,7 @@ make_button :: proc(ctx: UIContext, file: os.File_Info, y: i32) -> bool {
     return false
 }
 
-read_dir :: proc(path: string) -> (info: []os.File_Info) {
+read_dir :: proc(path: string) -> (info: []FileInfo) {
     dir_handle, err := os.open(path)
 
     if err != os.ERROR_NONE {
@@ -141,16 +173,32 @@ read_dir :: proc(path: string) -> (info: []os.File_Info) {
     }
     defer os.close(dir_handle)
 
-    info, err = os.read_dir(dir_handle, 0)
+    files: []os.File_Info
+    files, err = os.read_dir(dir_handle, 0)
 
     if err != os.ERROR_NONE {
         return
     }
 
+    info = make([]FileInfo, len(files))
+    for i in 0..<(len(files)) {
+        info[i].is_dir = files[i].is_dir
+        info[i].size = files[i].size
+        if files[i].is_dir {
+          info[i].fullpath = files[i].fullpath
+          info[i].name = files[i].name
+        } else {
+            delete(files[i].fullpath)
+            info[i].fullpath = strings.clone("[REDACTED]")
+            info[i].name = info[i].fullpath
+        }
+    }
+    delete(files)
+
     return info
 }
 
-sort_files :: proc(files: []os.File_Info) {
+sort_files :: proc(files: []FileInfo) {
     for {
         did_swap := false
         for i in 0..<(len(files)-1) {
@@ -164,18 +212,25 @@ sort_files :: proc(files: []os.File_Info) {
     }
 }
 
-swap :: proc(lhs, rhs: os.File_Info) -> (new_lhs, new_rhs: os.File_Info, is_swap: bool) {
+swap :: proc(lhs, rhs: FileInfo) -> (new_lhs, new_rhs: FileInfo, is_swap: bool) {
     if lhs.is_dir && !rhs.is_dir {
         return lhs, rhs, false
     } else if rhs.is_dir && !lhs.is_dir {
         return rhs, lhs, true
     }
     switch strings.compare(lhs.name, rhs.name) {
-        case -1:
-            return lhs, rhs, false
-        case:
+        case 1:
             return rhs, lhs, true
+        case:
+            return lhs, rhs, false
     }
+}
+
+free_files :: proc(files: []FileInfo) {
+    for file in files {
+        delete(file.fullpath)
+    }
+    delete(files)
 }
 
 switch_dir :: proc(state: ^DirState, path: string) {
@@ -183,7 +238,7 @@ switch_dir :: proc(state: ^DirState, path: string) {
         delete(state.current_dir)
     }
     if state.files != nil {
-        delete(state.files)
+        free_files(state.files)
     }
     state.current_dir = path
     state.files = read_dir(state.current_dir)
